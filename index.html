@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UI для Python-агента</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.6.8/dist/axios.min.js" integrity="sha256-MnVnnkgTNTnUrt0KoYlCYwH14r2raXIiQunlslqY5Tg=" crossorigin="anonymous"></script>
+    <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+    <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.20/babel.min.js"></script>
+    <style>
+      body {
+        font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+      .scrollbar-thin::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-thumb {
+        background-color: rgba(100, 116, 139, 0.5);
+        border-radius: 9999px;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 min-h-screen text-slate-900">
+    <div id="root" class="min-h-screen"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+      const TABS = [
+        { id: 'files', label: 'Файлы' },
+        { id: 'summary', label: 'Сводка о проекте' },
+        { id: 'task', label: 'Текущее задание' },
+        { id: 'plan', label: 'План на развитие' },
+      ];
+
+      axios.defaults.headers.common['Content-Type'] = 'application/json';
+
+      const NotificationContext = React.createContext();
+
+      const NotificationProvider = ({ children }) => {
+        const [messages, setMessages] = useState([]);
+
+        const removeMessage = useCallback((id) => {
+          setMessages((msgs) => msgs.filter((msg) => msg.id !== id));
+        }, []);
+
+        const pushMessage = useCallback((message) => {
+          const id = crypto.randomUUID();
+          const payload = { id, ...message };
+          setMessages((msgs) => [...msgs, payload]);
+          setTimeout(() => removeMessage(id), message.ttl ?? 4000);
+        }, [removeMessage]);
+
+        const contextValue = useMemo(() => ({ pushMessage }), [pushMessage]);
+
+        return (
+          <NotificationContext.Provider value={contextValue}>
+            {children}
+            <div className="fixed bottom-4 right-4 space-y-2 z-50">
+              {messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`shadow-lg rounded-xl px-4 py-3 text-sm border ${
+                    msg.type === 'error'
+                      ? 'bg-red-50 border-red-200 text-red-700'
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                  }`}
+                >
+                  <div className="font-semibold mb-1">{msg.title}</div>
+                  <div>{msg.description}</div>
+                </div>
+              ))}
+            </div>
+          </NotificationContext.Provider>
+        );
+      };
+
+      const useNotifications = () => React.useContext(NotificationContext);
+
+      const useCachedRequest = (endpoint, method = 'GET') => {
+        const cacheRef = useRef({ data: null, timestamp: null });
+        const { pushMessage } = useNotifications();
+        const [loading, setLoading] = useState(false);
+        const [data, setData] = useState(null);
+        const [error, setError] = useState(null);
+
+        const request = useCallback(
+          async (options = {}) => {
+            setLoading(true);
+            setError(null);
+            try {
+              const response = await axios({
+                url: endpoint,
+                method,
+                ...options,
+              });
+              const payload = response.data;
+              cacheRef.current = { data: payload, timestamp: Date.now() };
+              setData(payload);
+              setLoading(false);
+              return payload;
+            } catch (err) {
+              console.error(err);
+              const description = err.response?.data?.message || err.message;
+              pushMessage({
+                type: 'error',
+                title: 'Ошибка',
+                description,
+              });
+              setError(description);
+              setLoading(false);
+              throw err;
+            }
+          },
+          [endpoint, method, pushMessage]
+        );
+
+        const hydrateFromCache = useCallback(() => {
+          if (cacheRef.current.data) {
+            setData(cacheRef.current.data);
+          }
+        }, []);
+
+        return { data, loading, error, request, hydrateFromCache };
+      };
+
+      const SectionHeader = ({ title, actions }) => (
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-6">
+          <h2 className="text-xl font-semibold text-slate-800">{title}</h2>
+          {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
+        </div>
+      );
+
+      const TabNavigation = ({ activeTab, onChange }) => (
+        <nav className="bg-white rounded-2xl shadow-sm border border-slate-200 p-2 flex flex-wrap gap-2">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              className={`px-4 py-2 rounded-xl transition-colors text-sm font-medium ${
+                activeTab === tab.id
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+              onClick={() => onChange(tab.id)}
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      );
+
+      const FilesTab = () => {
+        const { data, loading, request, hydrateFromCache } = useCachedRequest('/files');
+        const { pushMessage } = useNotifications();
+        const [filter, setFilter] = useState('');
+        const [selectedFile, setSelectedFile] = useState(null);
+        const [content, setContent] = useState('');
+        const [isContentLoading, setContentLoading] = useState(false);
+
+        useEffect(() => {
+          if (!data) {
+            request();
+          } else {
+            hydrateFromCache();
+          }
+        }, [data, hydrateFromCache, request]);
+
+        const filteredFiles = useMemo(() => {
+          if (!data?.files) return [];
+          return data.files.filter((file) =>
+            file.name.toLowerCase().includes(filter.toLowerCase())
+          );
+        }, [data, filter]);
+
+        const fetchFileContent = async (fileName) => {
+          setContentLoading(true);
+          try {
+            const response = await axios.get(`/files`, {
+              params: { name: fileName },
+            });
+            setContent(response.data.content ?? '');
+            setSelectedFile(fileName);
+          } catch (err) {
+            // error handled in hook via interceptor
+          } finally {
+            setContentLoading(false);
+          }
+        };
+
+        const triggerIndexing = async () => {
+          try {
+            await axios.post('/index');
+            pushMessage({
+              type: 'success',
+              title: 'Индексация начата',
+              description: 'Агент начал переиндексацию проекта.',
+            });
+          } catch (err) {
+            // handled globally
+          }
+        };
+
+        return (
+          <div className="grid lg:grid-cols-2 gap-6">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+              <SectionHeader
+                title="Список файлов"
+                actions={
+                  <>
+                    <input
+                      type="search"
+                      value={filter}
+                      placeholder="Поиск по имени..."
+                      onChange={(e) => setFilter(e.target.value)}
+                      className="px-3 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={triggerIndexing}
+                      className="px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium transition-colors"
+                    >
+                      Индексация
+                    </button>
+                  </>
+                }
+              />
+              <div className="overflow-hidden border border-slate-100 rounded-xl">
+                <div className="max-h-96 overflow-auto scrollbar-thin">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-slate-100 text-slate-600 uppercase text-xs">
+                      <tr>
+                        <th className="px-4 py-3 text-left">Имя</th>
+                        <th className="px-4 py-3 text-left">Описание</th>
+                        <th className="px-4 py-3 text-left">Изменён</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {loading ? (
+                        <tr>
+                          <td className="px-4 py-5 text-center text-slate-400" colSpan="3">
+                            Загрузка...
+                          </td>
+                        </tr>
+                      ) : filteredFiles.length === 0 ? (
+                        <tr>
+                          <td className="px-4 py-5 text-center text-slate-400" colSpan="3">
+                            Файлы не найдены
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredFiles.map((file) => (
+                          <tr
+                            key={file.name}
+                            className={`cursor-pointer transition-colors ${
+                              selectedFile === file.name
+                                ? 'bg-slate-100'
+                                : 'hover:bg-slate-50'
+                            }`}
+                            onClick={() => fetchFileContent(file.name)}
+                          >
+                            <td className="px-4 py-3 font-medium text-slate-700">{file.name}</td>
+                            <td className="px-4 py-3 text-slate-600">{file.description}</td>
+                            <td className="px-4 py-3 text-slate-500">{file.modified}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex flex-col">
+              <SectionHeader title="Просмотр содержимого" />
+              <div className="flex-1 bg-slate-900 text-slate-100 rounded-xl p-4 overflow-auto scrollbar-thin text-sm">
+                {isContentLoading ? 'Загрузка содержимого...' : content || 'Выберите файл, чтобы увидеть содержимое.'}
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const StatCard = ({ label, value }) => (
+        <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+          <div className="text-xs uppercase text-slate-500 tracking-wide mb-2">{label}</div>
+          <div className="text-2xl font-semibold text-slate-800">{value}</div>
+        </div>
+      );
+
+      const ProjectSummaryTab = () => {
+        const { data, loading, request, hydrateFromCache } = useCachedRequest('/project');
+
+        useEffect(() => {
+          if (!data) {
+            request();
+          } else {
+            hydrateFromCache();
+          }
+        }, [data, hydrateFromCache, request]);
+
+        const metadata = data?.project ?? {};
+        const stats = data?.stats ?? {};
+
+        return (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+              <SectionHeader
+                title="Общая информация"
+                actions={
+                  <button
+                    type="button"
+                    onClick={() => request()}
+                    className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 transition-colors"
+                  >
+                    Обновить
+                  </button>
+                }
+              />
+              {loading ? (
+                <div className="text-slate-500">Загрузка...</div>
+              ) : (
+                <div className="grid md:grid-cols-2 gap-6 text-sm text-slate-600">
+                  <div className="space-y-2">
+                    <div><span className="text-slate-500">Название:</span> {metadata.name ?? '—'}</div>
+                    <div><span className="text-slate-500">Количество файлов:</span> {metadata.fileCount ?? '—'}</div>
+                  </div>
+                  <div className="space-y-2">
+                    <div><span className="text-slate-500">Размер:</span> {metadata.size ?? '—'}</div>
+                    <div><span className="text-slate-500">Последняя индексация:</span> {metadata.lastIndexed ?? '—'}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="grid md:grid-cols-4 gap-4">
+              <StatCard label="Активные задачи" value={stats.active ?? '—'} />
+              <StatCard label="Завершено" value={stats.completed ?? '—'} />
+              <StatCard label="Ожидает" value={stats.pending ?? '—'} />
+              <StatCard label="Ошибки" value={stats.failed ?? '—'} />
+            </div>
+          </div>
+        );
+      };
+
+      const StatusPill = ({ status }) => {
+        const map = {
+          pending: 'Ожидает',
+          running: 'Выполняется',
+          completed: 'Готово',
+          failed: 'Ошибка',
+          cancelled: 'Отменено',
+        };
+
+        const colors = {
+          pending: 'bg-amber-100 text-amber-700',
+          running: 'bg-blue-100 text-blue-700',
+          completed: 'bg-emerald-100 text-emerald-700',
+          failed: 'bg-red-100 text-red-700',
+          cancelled: 'bg-slate-200 text-slate-700',
+        };
+
+        const readable = map[status] ?? status ?? '—';
+        const colorClass = colors[status] ?? 'bg-slate-200 text-slate-700';
+
+        return (
+          <span className={`px-3 py-1 rounded-full text-xs font-medium ${colorClass}`}>
+            {readable}
+          </span>
+        );
+      };
+
+      const CurrentTaskTab = () => {
+        const { data, request, hydrateFromCache } = useCachedRequest('/task', 'GET');
+        const { pushMessage } = useNotifications();
+        const [input, setInput] = useState('');
+        const [submitting, setSubmitting] = useState(false);
+        const taskData = data?.task ?? {};
+
+        const loadTask = useCallback(() => {
+          request().catch(() => {});
+        }, [request]);
+
+        useEffect(() => {
+          if (!data) {
+            loadTask();
+          } else {
+            hydrateFromCache();
+          }
+        }, [data, hydrateFromCache, loadTask]);
+
+        const submitTask = async () => {
+          if (!input.trim()) {
+            pushMessage({
+              type: 'error',
+              title: 'Пустая задача',
+              description: 'Добавьте описание задачи перед отправкой.',
+            });
+            return;
+          }
+          setSubmitting(true);
+          try {
+            await axios.post('/task', { description: input.trim() });
+            pushMessage({
+              type: 'success',
+              title: 'Задача отправлена',
+              description: 'Агент начал работу над задачей.',
+            });
+            setInput('');
+            loadTask();
+          } catch (err) {
+            // уведомление уже показано
+          } finally {
+            setSubmitting(false);
+          }
+        };
+
+        const cancelTask = async () => {
+          try {
+            await axios.post('/task', { cancel: true });
+            pushMessage({
+              type: 'success',
+              title: 'Задача отменена',
+              description: 'Текущее задание остановлено.',
+            });
+            loadTask();
+          } catch (err) {
+            // handled globally
+          }
+        };
+
+        const textareaRef = useRef(null);
+
+        useEffect(() => {
+          const handler = (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+              if (document.activeElement === textareaRef.current) {
+                event.preventDefault();
+                submitTask();
+              }
+            }
+          };
+          window.addEventListener('keydown', handler);
+          return () => window.removeEventListener('keydown', handler);
+        });
+
+        return (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+              <SectionHeader title="Новое задание" />
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-2">
+                  Описание задачи
+                </label>
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Опишите, что должен сделать агент..."
+                  rows="4"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+                />
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={submitTask}
+                  disabled={submitting}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium text-white transition-colors ${
+                    submitting ? 'bg-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800'
+                  }`}
+                >
+                  Отправить (Ctrl+Enter)
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelTask}
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors"
+                >
+                  Отменить
+                </button>
+                <button
+                  type="button"
+                  onClick={loadTask}
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors"
+                >
+                  Обновить
+                </button>
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+              <SectionHeader title="Состояние задания" />
+              <div className="grid md:grid-cols-2 gap-4 text-sm text-slate-600">
+                <div>
+                  <div className="text-slate-500">Описание</div>
+                  <div className="font-medium text-slate-800 mt-1">
+                    {taskData.description ?? 'Нет активного задания'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Статус</div>
+                  <div className="mt-1">
+                    <StatusPill status={taskData.status} />
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Прогресс</div>
+                  <div className="mt-1 font-medium text-slate-800">{taskData.progress ?? '0%'}%</div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Обновлено</div>
+                  <div className="mt-1 text-slate-700">{taskData.updatedAt ?? '—'}</div>
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500 mb-2">Лог</div>
+                <div className="bg-slate-900 text-slate-100 rounded-xl p-4 text-xs whitespace-pre-wrap max-h-72 overflow-auto scrollbar-thin">
+                  {taskData.log ?? 'Лог выполнения появится здесь.'}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const PriorityBadge = ({ priority }) => {
+        const map = {
+          high: { label: 'Высокий', className: 'bg-rose-100 text-rose-700' },
+          medium: { label: 'Средний', className: 'bg-amber-100 text-amber-700' },
+          low: { label: 'Низкий', className: 'bg-emerald-100 text-emerald-700' },
+        };
+        const { label, className } = map[priority] ?? {
+          label: 'Не указан',
+          className: 'bg-slate-200 text-slate-700',
+        };
+        return (
+          <span className={`px-3 py-1 rounded-full text-xs font-medium ${className}`}>
+            {label}
+          </span>
+        );
+      };
+
+      const DevelopmentPlanTab = () => {
+        const { data, request, hydrateFromCache } = useCachedRequest('/plan');
+        const { pushMessage } = useNotifications();
+        const [statusFilter, setStatusFilter] = useState('all');
+        const [draft, setDraft] = useState({ title: '', priority: 'medium', status: 'planned' });
+        const [isSaving, setIsSaving] = useState(false);
+
+        const loadPlan = useCallback(() => {
+          request().catch(() => {});
+        }, [request]);
+
+        useEffect(() => {
+          if (!data) {
+            loadPlan();
+          } else {
+            hydrateFromCache();
+          }
+        }, [data, hydrateFromCache, loadPlan]);
+
+        const filteredItems = useMemo(() => {
+          if (!data?.plan) return [];
+          if (statusFilter === 'all') return data.plan;
+          return data.plan.filter((item) => item.status === statusFilter);
+        }, [data, statusFilter]);
+
+        const savePlanItem = async () => {
+          if (!draft.title.trim()) {
+            pushMessage({
+              type: 'error',
+              title: 'Пустое название',
+              description: 'Укажите краткое описание задачи.',
+            });
+            return;
+          }
+          setIsSaving(true);
+          try {
+            await axios.post('/plan', draft);
+            pushMessage({
+              type: 'success',
+              title: 'План обновлён',
+              description: 'Изменения плана сохранены.',
+            });
+            setDraft({ title: '', priority: 'medium', status: 'planned' });
+            loadPlan();
+          } catch (err) {
+            // handled globally
+          } finally {
+            setIsSaving(false);
+          }
+        };
+
+        const editItem = (item) => {
+          setDraft({
+            id: item.id,
+            title: item.title,
+            priority: item.priority,
+            status: item.status,
+          });
+          pushMessage({
+            type: 'success',
+            title: 'Редактирование',
+            description: 'Данные задачи загружены в форму.',
+          });
+        };
+
+        return (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+              <SectionHeader title="Редактирование плана" />
+              <div className="grid md:grid-cols-2 gap-4 text-sm">
+                <div className="space-y-2">
+                  <label className="text-slate-600 font-medium">Название</label>
+                  <input
+                    type="text"
+                    value={draft.title}
+                    onChange={(e) => setDraft((prev) => ({ ...prev, title: e.target.value }))}
+                    placeholder="Например, улучшить обработку ошибок"
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-slate-600 font-medium">Приоритет</label>
+                  <div className="flex gap-2 flex-wrap">
+                    {['high', 'medium', 'low'].map((priority) => (
+                      <button
+                        key={priority}
+                        type="button"
+                        onClick={() => setDraft((prev) => ({ ...prev, priority }))}
+                        className={`px-3 py-2 rounded-xl text-sm border transition-colors ${
+                          draft.priority === priority
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {priority === 'high'
+                          ? 'Высокий'
+                          : priority === 'medium'
+                          ? 'Средний'
+                          : 'Низкий'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-slate-600 font-medium">Статус</label>
+                  <div className="flex gap-2 flex-wrap">
+                    {[
+                      { value: 'planned', label: 'Запланировано' },
+                      { value: 'in_progress', label: 'В работе' },
+                      { value: 'done', label: 'Готово' },
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setDraft((prev) => ({ ...prev, status: option.value }))}
+                        className={`px-3 py-2 rounded-xl text-sm border transition-colors ${
+                          draft.status === option.value
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="flex gap-3 flex-wrap">
+                <button
+                  type="button"
+                  onClick={savePlanItem}
+                  disabled={isSaving}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium text-white transition-colors ${
+                    isSaving ? 'bg-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800'
+                  }`}
+                >
+                  Сохранить
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDraft({ title: '', priority: 'medium', status: 'planned' })}
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors"
+                >
+                  Очистить
+                </button>
+                <button
+                  type="button"
+                  onClick={loadPlan}
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors"
+                >
+                  Обновить
+                </button>
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+              <SectionHeader
+                title="Список задач"
+                actions={
+                  <div className="flex gap-2">
+                    {[
+                      { value: 'all', label: 'Все' },
+                      { value: 'planned', label: 'Запланировано' },
+                      { value: 'in_progress', label: 'В работе' },
+                      { value: 'done', label: 'Готово' },
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setStatusFilter(option.value)}
+                        className={`px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${
+                          statusFilter === option.value
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                }
+              />
+              <div className="space-y-3">
+                {filteredItems.length === 0 ? (
+                  <div className="text-slate-500 text-sm">Задачи не найдены.</div>
+                ) : (
+                  filteredItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className="border border-slate-200 rounded-2xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 hover:border-slate-300 transition-colors"
+                    >
+                      <div>
+                        <div className="text-base font-semibold text-slate-800">{item.title}</div>
+                        <div className="text-xs text-slate-500 mt-1">ID: {item.id}</div>
+                      </div>
+                      <div className="flex flex-wrap gap-2 items-center">
+                        <PriorityBadge priority={item.priority} />
+                        <StatusPill status={item.status} />
+                        <button
+                          type="button"
+                          onClick={() => editItem(item)}
+                          className="px-3 py-2 rounded-xl text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700"
+                        >
+                          Редактировать
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const TabContent = ({ activeTab }) => {
+        switch (activeTab) {
+          case 'files':
+            return <FilesTab />;
+          case 'summary':
+            return <ProjectSummaryTab />;
+          case 'task':
+            return <CurrentTaskTab />;
+          case 'plan':
+            return <DevelopmentPlanTab />;
+          default:
+            return null;
+        }
+      };
+
+      const App = () => {
+        const [activeTab, setActiveTab] = useState('files');
+
+        return (
+          <NotificationProvider>
+            <div className="max-w-6xl mx-auto py-10 px-4 lg:px-0 space-y-8">
+              <header className="space-y-4">
+                <h1 className="text-3xl font-semibold text-slate-900">Панель управления агентом</h1>
+                <p className="text-slate-600 text-sm md:text-base max-w-2xl">
+                  Управляйте файлами, следите за прогрессом задач и планируйте развитие проекта. Все действия выполняются через API Python-агента.
+                </p>
+              </header>
+              <TabNavigation activeTab={activeTab} onChange={setActiveTab} />
+              <main>
+                <TabContent activeTab={activeTab} />
+              </main>
+            </div>
+          </NotificationProvider>
+        );
+      };
+
+      ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+  </body>
+</html>
