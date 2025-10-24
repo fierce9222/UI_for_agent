@@ -1,0 +1,16 @@
+version: "3.9"
+services:
+  agent:
+    image: your-agent-image:latest
+    container_name: agent
+    expose:
+      - "8000"
+
+  ui:
+    build: .
+    container_name: ui
+    ports:
+      - "8080:80"
+    depends_on:
+      - agent
+
