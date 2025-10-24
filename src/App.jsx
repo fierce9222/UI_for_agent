@@ -23,7 +23,9 @@ const NotificationProvider = ({ children }) => {
 
   const pushMessage = useCallback(
     (message) => {
-      const id = crypto.randomUUID();
+      const id = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+        ? globalThis.crypto.randomUUID()
+        : Math.random().toString(36).slice(2);
       const payload = { id, ...message };
       setMessages((msgs) => [...msgs, payload]);
       setTimeout(() => removeMessage(id), message.ttl ?? 4000);
@@ -641,6 +643,49 @@ const TabContent = ({ activeTab }) => {
 
 const App = () => {
   const [activeTab, setActiveTab] = useState("files");
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsPersist, setSettingsPersist] = useState(true);
+
+  const loadSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    try {
+      const { data } = await axios.get("/settings");
+      setSettings(data);
+    } catch (e) {
+      console.error("Failed to load settings");
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { if (showSettings) loadSettings(); }, [showSettings, loadSettings]);
+
+  const saveSettings = useCallback(async () => {
+    if (!settings) return;
+    setSettingsSaving(true);
+    try {
+      const payload = {
+        ...settings,
+        temperature: Number(settings.temperature),
+        max_tokens: Number(settings.max_tokens),
+        max_ctx: Number(settings.max_ctx),
+        max_steps: Number(settings.max_steps),
+        cache_ttl: Number(settings.cache_ttl),
+        cache_max_size: Number(settings.cache_max_size),
+        persist: settingsPersist,
+      };
+      await axios.post("/settings", payload);
+      console.log("Settings saved", { persisted: settingsPersist });
+      setShowSettings(false);
+    } catch (e) {
+      console.error("Settings save failed", e.response?.data?.detail || e.message);
+      } finally {
+        setSettingsSaving(false);
+      }
+  }, [settings, settingsPersist]);
 
   return (
     <NotificationProvider>
@@ -656,9 +701,93 @@ const App = () => {
           <TabContent activeTab={activeTab} />
         </main>
       </div>
+      {/* Floating Settings button */}
+      <button
+        type="button"
+        onClick={() => setShowSettings(true)}
+        className="fixed bottom-4 right-4 px-4 py-2 rounded-xl text-sm font-medium bg-slate-900 text-white shadow hover:bg-slate-800"
+        aria-label="Open settings"
+      >
+        Settings
+      </button>
+
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/30" onClick={() => setShowSettings(false)} />
+          <div className="relative bg-white w-full max-w-3xl rounded-2xl shadow-xl border border-slate-200 p-6 max-h-[85vh] overflow-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-slate-900">Settings</h3>
+              <button type="button" onClick={() => setShowSettings(false)} className="px-3 py-1 rounded-xl text-sm bg-slate-100 text-slate-700 hover:bg-slate-200">Close</button>
+            </div>
+            {settingsLoading ? (
+              <div className="text-slate-500">Loading...</div>
+            ) : (
+              <div className="space-y-4">
+                {[
+                  { key: 'model', type: 'text', placeholder: 'gpt-oss:20b-cloud' },
+                  { key: 'fallback_model', type: 'text', placeholder: 'phi3:3.8b' },
+                  { key: 'temperature', type: 'number' },
+                  { key: 'max_tokens', type: 'number' },
+                  { key: 'max_ctx', type: 'number' },
+                  { key: 'max_steps', type: 'number' },
+                  { key: 'ollama_base_url', type: 'text', placeholder: 'http://localhost:11434' },
+                  { key: 'cache_ttl', type: 'number' },
+                  { key: 'cache_max_size', type: 'number' },
+                ].map((f) => (
+                  <div key={f.key} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center">
+                    <div className="text-sm text-slate-600">{f.key}</div>
+                    <div className="md:col-span-2">
+                      <input
+                        type={f.type}
+                        placeholder={f.placeholder || ''}
+                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+                        value={settings?.[f.key] ?? ''}
+                        onChange={(e)=>setSettings(s=>({...s, [f.key]: e.target.value}))}
+                      />
+                    </div>
+                  </div>
+                ))}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center">
+                  <div className="text-sm text-slate-600">safe_mode</div>
+                  <div className="md:col-span-2">
+                    <button type="button" onClick={()=>setSettings(s=>({...s, safe_mode: !s.safe_mode}))} className={`px-3 py-1 rounded-full text-xs font-medium border ${settings?.safe_mode?'bg-emerald-100 text-emerald-700 border-emerald-200':'bg-slate-100 text-slate-600 border-slate-200'}`}>{settings?.safe_mode?'on':'off'}</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center">
+                  <div className="text-sm text-slate-600">shell_enabled</div>
+                  <div className="md:col-span-2">
+                    <button type="button" onClick={()=>setSettings(s=>({...s, shell_enabled: !s.shell_enabled}))} className={`px-3 py-1 rounded-full text-xs font-medium border ${settings?.shell_enabled?'bg-emerald-100 text-emerald-700 border-emerald-200':'bg-slate-100 text-slate-600 border-slate-200'}`}>{settings?.shell_enabled?'on':'off'}</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center">
+                  <div className="text-sm text-slate-600">cache_enabled</div>
+                  <div className="md:col-span-2">
+                    <button type="button" onClick={()=>setSettings(s=>({...s, cache_enabled: !s.cache_enabled}))} className={`px-3 py-1 rounded-full text-xs font-medium border ${settings?.cache_enabled?'bg-emerald-100 text-emerald-700 border-emerald-200':'bg-slate-100 text-slate-600 border-slate-200'}`}>{settings?.cache_enabled?'on':'off'}</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center">
+                  <div className="text-sm text-slate-600">project_path</div>
+                  <div className="md:col-span-2">
+                    <input className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" value={settings?.project_path || ''} readOnly />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between pt-2">
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" className="rounded" checked={settingsPersist} onChange={(e)=>setSettingsPersist(e.target.checked)} />
+                    Persist to .env
+                  </label>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={()=>setShowSettings(false)} className="px-4 py-2 rounded-xl text-sm bg-slate-100 text-slate-700 hover:bg-slate-200">Close</button>
+                    <button type="button" onClick={saveSettings} disabled={settingsSaving} className={`px-4 py-2 rounded-xl text-sm font-medium text-white ${settingsSaving?'bg-slate-400 cursor-not-allowed':'bg-slate-900 hover:bg-slate-800'}`}>Save</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </NotificationProvider>
   );
 };
 
 export default App;
-
