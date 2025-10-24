@@ -1,7 +1,7 @@
 version: "3.9"
 services:
   agent:
-    image: your-agent-image:latest
+    image: agent:latest
     container_name: agent
     expose:
       - "8000"
